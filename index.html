@@ -1,0 +1,243 @@
+<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+  <title>福井くまマップ</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v7.1.0/ol.css">
+  <script src="https://cdn.jsdelivr.net/npm/ol@v7.1.0/dist/ol.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/geolib@3.3.3/lib/index.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.6/dayjs.min.js"></script>
+</head><body>
+  <h1 id=title></h1>
+  <div id=divsels></div>
+  <div>
+    <input type="checkbox" id="visible-marker" checked>
+    <label for="visible-marker">マーカー表示</label>
+    <input type="checkbox" id="visible-area" checked>
+    <label for="visible-area">エリア表示</label>
+  </div>
+  <div id="olmap" style="width:auto;height:600px;"></div>
+  <div id="popup" class="ol-popup">
+    <div id="popup-content"></div>
+  </div>
+  <hr />
+  <a href="https://tsukinowaguma.pref.fukui.lg.jp/" target="_blank">データ元</a>
+  (<a href="https://eiichimiyagawa.github.io/fukui-bear-map/bear.json" target="_blank">data</a>, <a href="https://github.com/EiichiMiyagawa/fukui-bear-map" target="_blank">src</a>)<br>
+  <p><a target="_blank" href="https://icons8.com/icon/OBmVbH2qOGwK/%E3%83%9E%E3%83%BC%E3%82%AB%E3%83%BC">マーカー</a> icon by <a target="_blank" href="https://icons8.com">Icons8</a></p>
+</div>
+
+<script type="module">
+  import { OLMap } from "https://eiichimiyagawa.github.io/OLMap/v1/OLMap.js";
+  import { SurveySelector } from "./survey-selector.js";
+  
+  // iOS14以前に関する対応（top-level await未対応のため）
+  addEventListener("load", async () => {
+    title.textContent = document.title;
+    const surveySelector = new SurveySelector();
+    
+    const url = "./bear.json";
+    const bearData = await (await fetch(url)).json();
+    
+    const latitude = bearData.reduce((pre, cur) => pre + parseFloat(cur.LAT), 0) / bearData.length;
+    const longitude = bearData.reduce((pre, cur) => pre + parseFloat(cur.LON), 0) / bearData.length;
+    const map = new OLMap({
+      tileUrl: "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png",
+      zoom: 9,
+      latitude,
+      longitude,
+    });
+    
+    map.addTileLayer("pic", "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg");
+    const picLayer = map.getLayer("pic");
+    picLayer.setOpacity(0.6);
+
+    map.addVectorLayer("area");
+    map.addVectorLayer("marker");
+
+    // 図形の色が濃いと地図の文字が見えなくなるので、アルファ値が低いレイヤーを追加して補助
+    map.addTileLayer("base2", "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png");
+    const base2Layer = map.getLayer("base2");
+    base2Layer.setOpacity(0.1);
+
+    const show = () => {
+      const styleFunction = (feature) => {
+        feature.setStyle(new ol.style.Style({
+            stroke: null,
+            fill: new ol.style.Fill({
+              color: feature.get("fill"),
+            })
+        }));
+      };
+
+      const markerLayer = map.getLayer("marker");
+      markerLayer.getSource().clear(true);
+
+      const areaLayer = map.getLayer("area");
+      areaLayer.setSource(null);
+      areaLayer.setStyle(styleFunction);
+      
+      const filter = ((data) => {
+        const fromDate = surveySelector.getFromDate();
+        const toDate = surveySelector.getToDate();
+        
+        return bearData.filter(d => {
+          const answerDate = dayjs(d["HIDUKE"]).hour(0).minute(0).second(0);
+          if (answerDate < fromDate || answerDate > toDate ) {
+            return false;
+          }
+          
+          return true;
+        });
+      });
+      
+      const bearData2 = filter(bearData);      
+      if (bearData2.length) {
+        const addMarker = (layer, params = {}) => {
+          const feature = new ol.Feature({
+            geometry: new ol.geom.Point(ol.proj.transform([params["longitude"], params["latitude"]], "EPSG:4326","EPSG:3857")),
+            content: params["content"] || ""
+          });
+          feature.setStyle(new ol.style.Style({
+            image: new ol.style.Icon({
+              anchor: [0.5, 1],
+              anchorXUnits: "fraction",
+              anchorYUnits: "fraction",
+              src: params["icon"] || "./v1/icon.png"
+            })
+          }));
+          layer.getSource().addFeature(feature);
+        };
+        
+        const geojsonObject = {
+          'type': 'FeatureCollection',
+          'crs': {
+            'type': 'name',
+            'properties': {
+              'name': 'EPSG:3857',
+            },
+          },
+          'features': []
+        };
+        
+        const addCircle = (params = {}) => {
+          // 地図の拡大率に併せて円の大きさを変更させる手法
+          const p = ol.geom.Polygon;
+          const circle = p.circular([params["longitude"], params["latitude"]], 1000, 16);
+          const feature = {
+            'type': 'Feature',
+            'geometry': {
+              'type': 'Polygon',
+              'coordinates': circle.getCoordinates()
+            },
+            "properties": {
+              fill: `rgba(255, 0, 0, ${params["alpha"] || 0})`,
+              isPopup: false
+            }
+          };
+          geojsonObject["features"].push(feature);
+        };
+
+        bearData2.forEach((bear) => {
+          addMarker(markerLayer, {
+            longitude: Number(bear["LON"]),
+            latitude: Number(bear["LAT"]),
+            content: `<p>${bear["SICHO"]}${bear["BASHO"]}</p><p>${bear["HIDUKE"]} ${bear["JIKAN"]} ${bear["SHUBETU"]}</p><p>頭数：${bear["TOSU"]}</p>`,
+            icon: "./image/icon.png"
+          });
+          
+          const rank = dayjs().year() - Number(bear["HIDUKE"].slice(0, 4)) + 1;
+          addCircle({
+            longitude: Number(bear["LON"]),
+            latitude: Number(bear["LAT"]),
+            alpha: Math.pow(0.5, rank)
+          })
+        });
+        
+        const source = new ol.source.Vector({
+          features: new ol.format.GeoJSON({
+            featureProjection: 'EPSG:3857'
+          }).readFeatures(geojsonObject)
+        });
+        areaLayer.setSource(source);
+      }
+    }
+    
+    divsels.appendChild(document.createElement("br"));
+    
+    const from = dayjs().subtract(1, "year");
+    const to = dayjs();
+    surveySelector.createDateInputElement(divsels, {
+      title: "開始日",
+      elementId: "fromDate",
+      date: from.format("YYYY-MM-DD"),
+      onChange: show
+    });
+    surveySelector.createDateInputElement(divsels, {
+      title: "終了日",
+      elementId: "toDate",
+      date: to.format("YYYY-MM-DD"),
+      onChange: show
+    });
+
+    const visibleMarkerCheckBoxElement = document.getElementById("visible-marker");
+    visibleMarkerCheckBoxElement.onchange = (event) => {
+      const layer = map.getLayer("marker");
+      layer.setVisible(event.target.checked);
+    };
+
+    const visibleAreaCheckBoxElement = document.getElementById("visible-area");
+    visibleAreaCheckBoxElement.onchange = (event) => {
+      const layer = map.getLayer("area");
+      layer.setVisible(event.target.checked);
+    };
+
+    show();
+  });
+  
+</script>
+
+<style>
+  body {
+    text-align: center;
+    font-family: sans-serif;
+  }
+  textarea {
+    width: 70vw;
+    height: 8em;
+  }
+  #divsels {
+    margin-bottom: .5em;
+  }
+  #prefbox > * {
+    margin: .5em .2em;
+  }
+  .ol-popup {
+    position: absolute;
+    background-color: white;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+    padding: 15px;
+    border-radius: 10px;
+    border: 1px solid #cccccc;
+    bottom: 12px;
+    left: -50px;
+    min-width: 280px;
+  }
+  .ol-popup:after, .ol-popup:before {
+    top: 100%;
+    border: solid transparent;
+    content: " ";
+    height: 0;
+    width: 0;
+    position: absolute;
+    pointer-events: none;
+  }
+  .ol-popup:after {
+    border-top-color: white;
+    border-width: 10px;
+    left: 48px;
+    margin-left: -10px;
+  }
+  .ol-popup:before {
+    border-top-color: #cccccc;
+    border-width: 11px;
+    left: 48px;
+    margin-left: -11px;
+  }
+</style>
